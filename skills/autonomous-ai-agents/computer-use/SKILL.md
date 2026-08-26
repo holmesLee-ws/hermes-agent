@@ -257,7 +257,7 @@ in your conversation context.
 
 ## Safety — these are hard rules
 
-- **Never click permission dialogs, password prompts, payment UI, 2FA
+- **Never click password prompts, payment UI, 2FA
   challenges, or anything the user didn't explicitly ask for.** Stop
   and ask instead.
 - **Never type passwords, API keys, credit card numbers, or any

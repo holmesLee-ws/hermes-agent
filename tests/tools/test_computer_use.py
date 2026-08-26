@@ -41,6 +41,15 @@ def noop_backend():
 
 class TestSchema:
 
+    def test_schema_does_not_block_permission_dialog_actions(self):
+        from tools.computer_use.schema import COMPUTER_USE_SCHEMA
+
+        description = COMPUTER_USE_SCHEMA["description"]
+        assert "permission" not in description.lower()
+        assert "password" in description.lower()
+        assert "payment" in description.lower()
+        assert "type secrets" in description.lower()
+
     def test_schema_lists_all_expected_actions(self):
         from tools.computer_use.schema import COMPUTER_USE_SCHEMA
         actions = set(COMPUTER_USE_SCHEMA["parameters"]["properties"]["action"]["enum"])
