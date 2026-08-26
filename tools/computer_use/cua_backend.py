@@ -3484,7 +3484,9 @@ class CuaDriverBackend(ComputerUseBackend):
                     delivery_mode="foreground",
                     message="The connected cua-driver does not advertise the standalone bring_to_front tool.",
                 )
-            if self._active_pid is None or self._active_window_id is None:
+            target_pid = args.get("pid")
+            target_window_id = args.get("window_id")
+            if target_pid is None or target_window_id is None:
                 return ActionResult(
                     ok=False,
                     action=action,
@@ -3493,8 +3495,8 @@ class CuaDriverBackend(ComputerUseBackend):
                     message="Capture an exact target before requesting persistent foreground focus.",
                 )
             focused = self.bring_to_front(
-                pid=self._active_pid,
-                window_id=self._active_window_id,
+                pid=target_pid,
+                window_id=target_window_id,
             )
             if not focused.ok:
                 return focused
@@ -3512,14 +3514,23 @@ class CuaDriverBackend(ComputerUseBackend):
         element: Optional[int] = None,
         x: Optional[int] = None,
         y: Optional[int] = None,
+        pid: Optional[int] = None,
+        window_id: Optional[int] = None,
         button: str = "left",
         click_count: int = 1,
         modifiers: Optional[List[str]] = None,
         delivery_mode: Optional[str] = None,
         bring_to_front: bool = False,
     ) -> ActionResult:
-        pid = self._active_pid
-        if pid is None:
+        if (pid is None) != (window_id is None):
+            return ActionResult(
+                ok=False,
+                action="click",
+                message="Exact click targeting requires both pid and window_id.",
+            )
+        target_pid = pid if pid is not None else self._active_pid
+        target_window_id = window_id if window_id is not None else self._active_window_id
+        if target_pid is None:
             return ActionResult(ok=False, action="click",
                                 message="No active window — call capture() first.")
 
@@ -3537,20 +3548,20 @@ class CuaDriverBackend(ComputerUseBackend):
                                 message=f"unknown button {button!r} — expected left, right, middle.")
         tool = "double_click" if click_count == 2 else "click"
 
-        args: Dict[str, Any] = {"pid": pid, "button": button_norm}
+        args: Dict[str, Any] = {"pid": target_pid, "button": button_norm}
         if element is not None:
-            if self._active_window_id is None:
+            if target_window_id is None:
                 return ActionResult(ok=False, action=tool,
                                     message="No active window_id for element_index click.")
             args["element_index"] = element
-            args["window_id"] = self._active_window_id
+            args["window_id"] = target_window_id
         elif x is not None and y is not None:
-            if self._active_window_id is None:
+            if target_window_id is None:
                 return ActionResult(ok=False, action=tool,
                                     message="No active window_id for coordinate click.")
             args["x"] = x
             args["y"] = y
-            args["window_id"] = self._active_window_id
+            args["window_id"] = target_window_id
         else:
             return ActionResult(ok=False, action=tool,
                                 message="click requires element= or x/y.")
@@ -3566,30 +3577,39 @@ class CuaDriverBackend(ComputerUseBackend):
         to_element: Optional[int] = None,
         from_xy: Optional[Tuple[int, int]] = None,
         to_xy: Optional[Tuple[int, int]] = None,
+        pid: Optional[int] = None,
+        window_id: Optional[int] = None,
         button: str = "left",
         modifiers: Optional[List[str]] = None,
         delivery_mode: Optional[str] = None,
         bring_to_front: bool = False,
     ) -> ActionResult:
-        pid = self._active_pid
-        if pid is None:
+        if (pid is None) != (window_id is None):
+            return ActionResult(
+                ok=False,
+                action="drag",
+                message="Exact drag targeting requires both pid and window_id.",
+            )
+        target_pid = pid if pid is not None else self._active_pid
+        target_window_id = window_id if window_id is not None else self._active_window_id
+        if target_pid is None:
             return ActionResult(ok=False, action="drag",
                                 message="No active window — call capture() first.")
-        args: Dict[str, Any] = {"pid": pid}
+        args: Dict[str, Any] = {"pid": target_pid}
         if from_element is not None and to_element is not None:
-            if self._active_window_id is None:
+            if target_window_id is None:
                 return ActionResult(ok=False, action="drag",
                                     message="No active window_id for element-based drag.")
             args["from_element"] = from_element
             args["to_element"] = to_element
-            args["window_id"] = self._active_window_id
+            args["window_id"] = target_window_id
         elif from_xy is not None and to_xy is not None:
-            if self._active_window_id is None:
+            if target_window_id is None:
                 return ActionResult(ok=False, action="drag",
                                     message="No active window_id for coordinate drag.")
             args["from_x"], args["from_y"] = int(from_xy[0]), int(from_xy[1])
             args["to_x"], args["to_y"] = int(to_xy[0]), int(to_xy[1])
-            args["window_id"] = self._active_window_id
+            args["window_id"] = target_window_id
         else:
             return ActionResult(ok=False, action="drag",
                                 message="drag requires from_element/to_element or from_coordinate/to_coordinate.")
@@ -3603,24 +3623,36 @@ class CuaDriverBackend(ComputerUseBackend):
         element: Optional[int] = None,
         x: Optional[int] = None,
         y: Optional[int] = None,
+        pid: Optional[int] = None,
+        window_id: Optional[int] = None,
         modifiers: Optional[List[str]] = None,
         delivery_mode: Optional[str] = None,
         bring_to_front: bool = False,
     ) -> ActionResult:
-        pid = self._active_pid
-        if pid is None:
+        if (pid is None) != (window_id is None):
+            return ActionResult(
+                ok=False,
+                action="scroll",
+                message="Exact scroll targeting requires both pid and window_id.",
+            )
+        target_pid = pid if pid is not None else self._active_pid
+        target_window_id = window_id if window_id is not None else self._active_window_id
+        if target_pid is None:
             return ActionResult(ok=False, action="scroll",
                                 message="No active window — call capture() first.")
         args: Dict[str, Any] = {
-            "pid": pid,
+            "pid": target_pid,
             "direction": direction,
             "amount": max(1, min(50, amount)),
         }
-        if element is not None and self._active_window_id is not None:
+        if target_window_id is not None:
+            # Direction-only scrolls still need an exact window route; a PID
+            # alone can select a sibling window from the same application.
+            args["window_id"] = target_window_id
+        if element is not None and target_window_id is not None:
             args["element_index"] = element
-            args["window_id"] = self._active_window_id
         elif x is not None and y is not None:
-            if self._active_window_id is None:
+            if target_window_id is None:
                 return ActionResult(ok=False, action="scroll",
                                     message="No active window_id for coordinate scroll.")
             # CUA Driver 0.7.1 Linux schema rejects x/y on scroll. Only
@@ -3634,7 +3666,6 @@ class CuaDriverBackend(ComputerUseBackend):
             ):
                 args["x"] = x
                 args["y"] = y
-            args["window_id"] = self._active_window_id
         return self._run_input_action("scroll", args, delivery_mode, bring_to_front)
 
     # ── Keyboard ───────────────────────────────────────────────────

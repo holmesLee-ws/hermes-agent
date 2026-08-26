@@ -747,10 +747,14 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         res = backend.click(
             element=element if element is not None else None,
             x=x, y=y, button=button or "left", click_count=click_count,
+            pid=args.get("pid"), window_id=args.get("window_id"),
             modifiers=args.get("modifiers"),
             delivery_mode=delivery_mode, bring_to_front=bring_to_front,
         )
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(
+            backend, res, capture_after,
+            pid=args.get("pid"), window_id=args.get("window_id"),
+        )
 
     if action == "drag":
         has_elements = args.get("from_element") is not None and args.get("to_element") is not None
@@ -764,11 +768,15 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             to_element=args.get("to_element"),
             from_xy=tuple(args["from_coordinate"]) if args.get("from_coordinate") else None,
             to_xy=tuple(args["to_coordinate"]) if args.get("to_coordinate") else None,
+            pid=args.get("pid"), window_id=args.get("window_id"),
             button=args.get("button", "left"),
             modifiers=args.get("modifiers"),
             delivery_mode=delivery_mode, bring_to_front=bring_to_front,
         )
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(
+            backend, res, capture_after,
+            pid=args.get("pid"), window_id=args.get("window_id"),
+        )
 
     if action == "scroll":
         coord = args.get("coordinate") or (None, None)
@@ -778,10 +786,14 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             element=args.get("element"),
             x=coord[0] if coord and coord[0] is not None else None,
             y=coord[1] if coord and coord[1] is not None else None,
+            pid=args.get("pid"), window_id=args.get("window_id"),
             modifiers=args.get("modifiers"),
             delivery_mode=delivery_mode, bring_to_front=bring_to_front,
         )
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(
+            backend, res, capture_after,
+            pid=args.get("pid"), window_id=args.get("window_id"),
+        )
 
     if action == "type":
         res = backend.type_text(args.get("text", ""),
@@ -1383,7 +1395,12 @@ def _route_capture_through_aux_vision(
 
 
 def _maybe_follow_capture(
-    backend: ComputerUseBackend, res: ActionResult, do_capture: bool,
+    backend: ComputerUseBackend,
+    res: ActionResult,
+    do_capture: bool,
+    *,
+    pid: Optional[int] = None,
+    window_id: Optional[int] = None,
 ) -> Any:
     if not do_capture:
         return _text_response(res)
@@ -1397,8 +1414,9 @@ def _maybe_follow_capture(
         # generic app name for several unrelated windows, so app-only recapture
         # can silently switch targets after a successful action.
         target = getattr(backend, "_last_target", None) or {}
-        pid = target.get("pid")
-        window_id = target.get("window_id")
+        if pid is None or window_id is None:
+            pid = target.get("pid")
+            window_id = target.get("window_id")
         mode = _capture_after_mode()
         if pid is not None and window_id is not None:
             cap = backend.capture(mode=mode, pid=pid, window_id=window_id)

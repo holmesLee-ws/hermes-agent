@@ -186,6 +186,67 @@ def test_background_is_default_no_flag_sent():
     assert "delivery_mode" not in sess.last_args
 
 
+def test_click_exact_target_overrides_active_window():
+    out = {"isError": False, "data": {}, "structuredContent": {"effect": "confirmed"}}
+    sess = _FakeSession(out)
+    be = _make_backend(sess)
+
+    be.click(x=255, y=130, pid=696, window_id=51295)
+
+    assert (sess.last_args["pid"], sess.last_args["window_id"]) == (696, 51295)
+    assert (sess.last_args["x"], sess.last_args["y"]) == (255, 130)
+
+
+def test_foreground_bring_to_front_uses_exact_pointer_target():
+    out = {"isError": False, "data": {}, "structuredContent": {"effect": "confirmed"}}
+    sess = _FakeSession(out, input_properties={"click": {"delivery_mode"}})
+    be = _make_backend(sess)
+
+    be.click(
+        x=255,
+        y=130,
+        pid=696,
+        window_id=51295,
+        delivery_mode="foreground",
+        bring_to_front=True,
+    )
+
+    assert sess.calls[0] == ("bring_to_front", {"pid": 696, "window_id": 51295})
+    assert (sess.calls[1][1]["pid"], sess.calls[1][1]["window_id"]) == (696, 51295)
+
+
+def test_pointer_action_partial_exact_target_is_refused():
+    out = {"isError": False, "data": {}, "structuredContent": {}}
+    sess = _FakeSession(out)
+    be = _make_backend(sess)
+
+    res = be.click(x=10, y=20, pid=696)
+
+    assert res.ok is False
+    assert "both pid and window_id" in res.message
+    assert sess.last_args == {}
+
+
+def test_drag_exact_target_overrides_active_window():
+    out = {"isError": False, "data": {}, "structuredContent": {"effect": "confirmed"}}
+    sess = _FakeSession(out)
+    be = _make_backend(sess)
+
+    be.drag(from_xy=(10, 20), to_xy=(30, 40), pid=696, window_id=51295)
+
+    assert (sess.last_args["pid"], sess.last_args["window_id"]) == (696, 51295)
+
+
+def test_direction_only_scroll_keeps_exact_window_target():
+    out = {"isError": False, "data": {}, "structuredContent": {"effect": "confirmed"}}
+    sess = _FakeSession(out)
+    be = _make_backend(sess)
+
+    be.scroll(direction="down", pid=696, window_id=51295)
+
+    assert (sess.last_args["pid"], sess.last_args["window_id"]) == (696, 51295)
+
+
 def test_foreground_sent_when_schema_property_present():
     out = {"isError": False, "data": {}, "structuredContent": {"effect": "unverifiable"}}
     sess = _FakeSession(out, input_properties={"click": {"delivery_mode"}})
