@@ -199,6 +199,26 @@ _always_allow: Dict[str, set] = {}
 _escalation_warned: set = set()
 
 
+def _approval_bypass_active(session_id: str) -> bool:
+    """Return whether this run explicitly disabled approval prompts."""
+    try:
+        from tools.approval import (
+            get_current_session_key,
+            is_approval_bypass_active_for_session,
+        )
+
+        if is_approval_bypass_active_for_session(session_id or ""):
+            return True
+        current_key = get_current_session_key(default="")
+        return bool(
+            current_key
+            and current_key != (session_id or "")
+            and is_approval_bypass_active_for_session(current_key)
+        )
+    except Exception:
+        return False
+
+
 def _warn_bypass_escalation(session_id: str) -> None:
     """Say out loud that an approval bypass just widened the driver's mode.
 
@@ -247,22 +267,9 @@ def _cua_permission_mode(session_id: str) -> str:
     bypass in either means the user explicitly opted out of approvals for
     this run. Fails closed on any resolution error.
     """
-    try:
-        from tools.approval import (
-            get_current_session_key,
-            is_approval_bypass_active_for_session,
-        )
-
-        if is_approval_bypass_active_for_session(session_id):
-            _warn_bypass_escalation(session_id)
-            return "unrestricted"
-        current_key = get_current_session_key(default="")
-        if current_key and is_approval_bypass_active_for_session(current_key):
-            _warn_bypass_escalation(session_id)
-            return "unrestricted"
-    except Exception:
-        # Approval state must fail closed if it cannot be resolved.
-        pass
+    if _approval_bypass_active(session_id):
+        _warn_bypass_escalation(session_id)
+        return "unrestricted"
     try:
         # Without YOLO, honor the configured mode (standard | bounded).
         # bounded requires computer_use.capability_manifest; the backend
@@ -601,6 +608,8 @@ def _request_approval(action: str, args: Dict[str, Any],
     operation. State is keyed on session_id so concurrent runs don't leak
     unlocks into one another.
     """
+    if _approval_bypass_active(session_id):
+        return None
     is_foreground = args.get("delivery_mode") == "foreground"
     scope_key = (action, "foreground" if is_foreground else "background")
     with _approval_lock:

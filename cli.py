@@ -16545,6 +16545,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         The CLI's built-in approval UI returns `once` | `session` | `always`
         | `deny`. Translate between the two.
         """
+        # `--yolo` / approvals.mode=off already opted out of prompts. The
+        # computer_use handler also short-circuits, but if a host still
+        # reaches this callback, do not block on an unattended TTY.
+        try:
+            from tools.approval import is_approval_bypass_active
+
+            if is_approval_bypass_active():
+                return "always_approve"
+        except Exception:
+            pass
         # Build a command-ish string so the existing UI renders something
         # meaningful. `summary` is already a one-line human description.
         verdict = self._approval_callback(
