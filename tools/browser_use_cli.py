@@ -31,10 +31,135 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
 _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
 
-# Prepended to the model's code for named sessions on SHARED browsers (a /browser connect CDP override): the
-# harness daemon attaches to the first existing page at startup, so two fresh named daemons can land on the
-# SAME tab. Steering each onto a tab it created prevents clobbering. Runs once per daemon (marker keyed by
-# BU_NAME + daemon pid).
+# Every Browser Use interpreter wraps new_tab() with a global, browser-keyed
+# FIFO of targets created by Hermes.  The ledger is deliberately ownership
+# based: user tabs and tabs created by other automation never enter it and are
+# therefore never eligible for automatic closure.  Ten live Hermes tabs is a
+# hard ceiling per browser endpoint.
+_TAB_CAP_PREAMBLE = """\
+# hermes: cap live Hermes-owned tabs at ten per browser
+def _hermes_install_tab_cap():
+    import hashlib as _hashlib, json as _json, os as _os
+    import tempfile as _tf, time as _time
+
+    _endpoint = (
+        _os.environ.get("BU_CDP_WS")
+        or _os.environ.get("BU_CDP_URL")
+        or "local-default"
+    )
+    _browser_key = _hashlib.sha256(_endpoint.encode("utf-8")).hexdigest()[:16]
+    _uid = _os.getuid() if hasattr(_os, "getuid") else 0
+    _base = _os.path.join(_tf.gettempdir(), "hermes-bu-tabs-%s-%s" % (_uid, _browser_key))
+    _ledger = _base + ".json"
+    _lock = _base + ".lock"
+    _max_tabs = 10
+
+    def _live_page_ids():
+        try:
+            _infos = cdp("Target.getTargets").get("targetInfos", [])
+            return {
+                _info.get("targetId")
+                for _info in _infos
+                if _info.get("type") == "page" and _info.get("targetId")
+            }
+        except Exception:
+            return set()
+
+    def _acquire_lock():
+        for _attempt in range(100):
+            try:
+                _fd = _os.open(_lock, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600)
+                _os.close(_fd)
+                return True
+            except FileExistsError:
+                try:
+                    if _time.time() - _os.path.getmtime(_lock) > 10:
+                        _os.unlink(_lock)
+                        continue
+                except OSError:
+                    pass
+                _time.sleep(0.01)
+            except OSError:
+                return False
+        return False
+
+    def _release_lock():
+        try:
+            _os.unlink(_lock)
+        except OSError:
+            pass
+
+    def _load_owned():
+        try:
+            with open(_ledger, "r", encoding="utf-8") as _handle:
+                _value = _json.load(_handle)
+            return [str(_item) for _item in _value if isinstance(_item, str)]
+        except Exception:
+            return []
+
+    def _save_owned(_owned):
+        _temp = _ledger + ".%s.tmp" % _os.getpid()
+        try:
+            with open(_temp, "w", encoding="utf-8") as _handle:
+                _json.dump(_owned, _handle)
+            _os.replace(_temp, _ledger)
+        finally:
+            try:
+                if _os.path.exists(_temp):
+                    _os.unlink(_temp)
+            except OSError:
+                pass
+
+    def _register(_target_ids):
+        if not _acquire_lock():
+            return
+        try:
+            _live = _live_page_ids()
+            _owned = []
+            for _target_id in _load_owned():
+                if _target_id in _live and _target_id not in _owned:
+                    _owned.append(_target_id)
+            for _target_id in _target_ids:
+                if _target_id in _live and _target_id not in _owned:
+                    _owned.append(_target_id)
+            while len(_owned) > _max_tabs:
+                _victim = _owned.pop(0)
+                try:
+                    _closed = cdp("Target.closeTarget", targetId=_victim)
+                    if _closed.get("success") is False:
+                        _owned.insert(0, _victim)
+                        break
+                except Exception:
+                    _owned.insert(0, _victim)
+                    break
+            _save_owned(_owned)
+        finally:
+            _release_lock()
+
+    _original_new_tab = new_tab
+
+    def _capped_new_tab(*_args, **_kwargs):
+        _before = _live_page_ids()
+        _result = _original_new_tab(*_args, **_kwargs)
+        _after = _live_page_ids()
+        _register(sorted(_after - _before))
+        return _result
+
+    _register([])
+    globals()["_hermes_register_tab_ids"] = _register
+    globals()["new_tab"] = _capped_new_tab
+
+_hermes_install_tab_cap()
+del _hermes_install_tab_cap
+"""
+
+# Preamble prepended to the model's code for named sessions on SHARED
+# browsers (local Chrome / CDP override). The harness daemon attaches to the
+# first existing page at startup, so two fresh named daemons can land on the
+# SAME tab; steering this daemon onto a tab it created keeps concurrent named
+# sessions from clobbering each other before their first new_tab(). Runs
+# once per daemon (marker file keyed by BU_NAME under the harness runtime
+# state), costs one IPC round-trip on later calls.
 _OWN_TAB_PREAMBLE = """\
 # hermes: pin this named session to its own tab (once per daemon process)
 def _hermes_ensure_own_tab():
@@ -60,6 +185,9 @@ def _hermes_ensure_own_tab():
         _tid = cdp("Target.createTarget", url="about:blank").get("targetId")
         if _tid:
             switch_tab(_tid)
+            _register = globals().get("_hermes_register_tab_ids")
+            if _register:
+                _register([_tid])
     except Exception:
         pass  # best-effort: worst case is pre-fix behavior
     try:
@@ -543,11 +671,17 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     if route_err:
         return tool_error(route_err)
 
-    # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
-    # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
-    private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
+    # Every browser gets the ownership-aware tab cap. On a SHARED browser
+    # (local Chrome / CDP override) a fresh named daemon additionally
+    # attaches to the first existing page — the same page a sibling daemon
+    # may hold. Pin each named session to a tab it created before running
+    # the model's code. Private per-name browsers (provider-keyed or BU
+    # cloud) skip this: no one to collide with, and the extra tab would leak.
+    private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)
+    preamble = _TAB_CAP_PREAMBLE
     if session and not private_browser:
-        code = _OWN_TAB_PREAMBLE + code
+        preamble += _OWN_TAB_PREAMBLE
+    code = preamble + "globals().pop('_hermes_register_tab_ids', None)\n" + code
 
     workspace = _workspace_dir(task_id)
     if workspace:

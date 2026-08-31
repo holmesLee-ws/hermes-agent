@@ -14,6 +14,7 @@ Covers the three seams the integration relies on:
 import json
 import os
 import stat
+import tempfile
 import time
 
 import pytest
@@ -542,8 +543,7 @@ class TestBackendCdpResolution:
 
 
 class TestOwnTabPreamble:
-    """Named sessions on SHARED browsers (a /browser connect CDP override) get the own-tab preamble
-    prepended; private per-name browsers (packaged Chromium, provider) and unnamed sessions do not."""
+    """All browsers get the cap; only named shared sessions get own-tab pinning."""
 
     def _run(self, tmp_path, monkeypatch, *, session="", private=False, provider=False, shared_cdp=""):
         import tools.browser_tool as bt
@@ -565,6 +565,7 @@ class TestOwnTabPreamble:
     def test_named_shared_browser_gets_preamble(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, monkeypatch, session="r7k2", shared_cdp="http://127.0.0.1:9222")
         assert result["success"] is True
+        assert "_hermes_install_tab_cap" in result["output"]
         assert "_hermes_ensure_own_tab" in result["output"]
         # model code still present, after the preamble
         assert result["output"].index("_hermes_ensure_own_tab") < result["output"].index("print('payload')")
@@ -578,12 +579,14 @@ class TestOwnTabPreamble:
     def test_unnamed_session_gets_no_preamble(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, monkeypatch, session="")
         assert result["success"] is True
+        assert "_hermes_install_tab_cap" in result["output"]
         assert "_hermes_ensure_own_tab" not in result["output"]
 
-    def test_named_provider_browser_skips_preamble(self, tmp_path, monkeypatch):
-        """Per-name provider browsers are private — preamble would leak a tab."""
+    def test_named_provider_browser_skips_own_tab_preamble(self, tmp_path, monkeypatch):
+        """Private provider browsers get the cap without an extra pinned tab."""
         result = self._run(tmp_path, monkeypatch, session="r7k2", provider=True)
         assert result["success"] is True
+        assert "_hermes_install_tab_cap" in result["output"]
         assert "_hermes_ensure_own_tab" not in result["output"]
 
     def test_sentinel_never_reaches_subprocess_env(self, tmp_path, monkeypatch):
@@ -603,9 +606,52 @@ class TestOwnTabPreamble:
     def test_preamble_is_valid_python(self):
         import ast
 
+        ast.parse(bu_cli._TAB_CAP_PREAMBLE)
         ast.parse(bu_cli._OWN_TAB_PREAMBLE)
         # and composes with model code
-        ast.parse(bu_cli._OWN_TAB_PREAMBLE + "print('x')")
+        ast.parse(bu_cli._TAB_CAP_PREAMBLE + bu_cli._OWN_TAB_PREAMBLE + "print('x')")
+
+    def test_tab_cap_closes_oldest_owned_tab_and_preserves_user_tab(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+
+        active = {"user-tab"}
+        closed = []
+        counter = 0
+
+        def cdp(method, **kwargs):
+            if method == "Target.getTargets":
+                return {
+                    "targetInfos": [
+                        {"targetId": target_id, "type": "page"}
+                        for target_id in sorted(active)
+                    ]
+                }
+            if method == "Target.closeTarget":
+                target_id = kwargs["targetId"]
+                closed.append(target_id)
+                active.discard(target_id)
+                return {"success": True}
+            raise AssertionError(method)
+
+        def new_tab(_url):
+            nonlocal counter
+            target_id = f"hermes-{counter:02d}"
+            counter += 1
+            active.add(target_id)
+            return target_id
+
+        namespace = {"cdp": cdp, "new_tab": new_tab}
+        exec(bu_cli._TAB_CAP_PREAMBLE, namespace)
+
+        for index in range(11):
+            namespace["new_tab"](f"https://example.com/{index}")
+
+        assert closed == ["hermes-00"]
+        assert "user-tab" in active
+        assert len(active - {"user-tab"}) == 10
 
 
 class TestProviderPickerIntegration:
@@ -891,7 +937,8 @@ class TestBrowserExec:
         result = json.loads(bu_cli.browser_exec('print("hi")'))
         assert result["success"] is True
         assert result["exit_code"] == 0
-        assert 'got:print("hi")' in result["output"]
+        assert "got:# hermes: cap live Hermes-owned tabs" in result["output"]
+        assert result["output"].rstrip().endswith('print("hi")')
         assert "session" not in result
 
     def test_session_sets_bu_name(self, tmp_path, monkeypatch):
