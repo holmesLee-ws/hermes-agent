@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from tools.computer_use.backend import ActionResult
-from tools.computer_use.cua_backend_parse import _parse_key_combo
+from tools.computer_use.cua_backend_parse import _is_placeholder_id, _parse_key_combo
 
 _NO_TARGET_MSG = "No active window — call capture() first."
 _BTF_UNSUPPORTED_MSG = "The connected cua-driver does not advertise the standalone bring_to_front tool."
@@ -28,6 +28,10 @@ class _InputMixin:
                      window_id: Optional[int] = None,
                      need_window: bool = False) -> Tuple[Optional[ActionResult], Dict[str, Any]]:
         """``(refusal, base args)`` for an input action against an exact or sticky target."""
+        if _is_placeholder_id(pid):
+            pid = None
+        if _is_placeholder_id(window_id):
+            window_id = None
         if (pid is None) != (window_id is None):
             return _refuse(action, f"Exact {action} targeting requires both pid and window_id."), {}
         target_pid = pid if pid is not None else self._active_pid

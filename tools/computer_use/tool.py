@@ -493,6 +493,7 @@ _ACTIONS: Dict[str, _ActionSpec] = {
 }
 # Native input actions deliver to the backend's sticky target; `app=` is NOT a targeting parameter (guard in _dispatch).
 _INPUT_ACTIONS = frozenset(a for a, s in _ACTIONS.items() if s.input)
+_POINTER_ACTIONS = frozenset({"click", "double_click", "right_click", "middle_click", "drag", "scroll"})
 
 # Unknown actions are never aliased (no repairing bad model output), but the nearest real action is named as guidance.
 _ACTION_SUGGESTIONS = {
@@ -522,9 +523,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any], fe
     # only on read handlers (delivery kwargs would leak into backend input calls, and vice versa).
     res = spec.handler(backend, action, args, **(dict(delivery_mode=args.get("delivery_mode"), bring_to_front=bool(args.get("bring_to_front")))
                                                  if spec.input else dict(fence=fence, session_id=session_id)))
-    return res if isinstance(res, (str, dict)) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")), fence,
-                                                                         session_id=session_id, pid=args.get("pid"),
-                                                                         window_id=args.get("window_id"))
+    exact = ({"pid": args.get("pid"), "window_id": args.get("window_id")}
+             if action in _POINTER_ACTIONS else {})
+    return res if isinstance(res, (str, dict)) else _maybe_follow_capture(
+        backend, res, bool(args.get("capture_after")), fence, session_id=session_id, **exact)
 
 # ── Response shaping ────────────────────────────────────────────────────────
 def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
@@ -730,9 +732,10 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
     try:
         # Recapture the exact window when known: on Linux several unrelated windows may share an app name, so
         # app-only recapture can switch targets.
+        from tools.computer_use.cua_backend_parse import _positive_int
         target = getattr(backend, "_last_target", None) or {}
-        exact = {"pid": pid if pid is not None else target.get("pid"),
-                 "window_id": window_id if window_id is not None else target.get("window_id")}
+        exact = {"pid": _positive_int(pid) or target.get("pid"),
+                 "window_id": _positive_int(window_id) or target.get("window_id")}
         cap = backend.capture(mode=_capture_after_mode(), **(exact if None not in exact.values()
                                                             else {"app": getattr(backend, "_last_app", None)}))
     except Exception as e:
