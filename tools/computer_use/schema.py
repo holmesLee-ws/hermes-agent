@@ -62,15 +62,15 @@ _PROPERTIES: Dict[str, Any] = {
     "pid": {
         "type": "integer",
         "description": (
-            "Optional exact process target for action='capture'. Pair with window_id when "
-            "discovery cannot resolve an X11 app."
+            "Optional exact process target for capture or pointer actions. Pair with window_id; "
+            "for pixel input this preserves the coordinate frame of that exact captured window."
         ),
     },
     "window_id": {
         "type": "integer",
         "description": (
-            "Optional exact native window target for action='capture'. Pair with pid when an "
-            "external cua-driver list_windows lookup has already identified the window."
+            "Optional exact native window target for capture or pointer actions. Pair with pid "
+            "when list_windows or a prior exact capture identified the window."
         ),
     },
     "element": {

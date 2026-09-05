@@ -318,6 +318,7 @@ def _scroll_xy(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _do_click(backend, action, args, button=None, count=1, **delivery):
     return backend.click(element=args.get("element"), **_xy(args), button=button or args.get("button") or "left",
+                         pid=args.get("pid"), window_id=args.get("window_id"),
                          click_count=count, modifiers=args.get("modifiers"), **delivery)
 
 def _do_drag(backend, action, args, **delivery):
@@ -326,11 +327,13 @@ def _do_drag(backend, action, args, **delivery):
         return json.dumps({"error": "drag requires from_coordinate/to_coordinate or from_element/to_element"})
     return backend.drag(from_element=args.get("from_element"), to_element=args.get("to_element"),
                         from_xy=tuple(src) if src else None, to_xy=tuple(dst) if dst else None,
+                        pid=args.get("pid"), window_id=args.get("window_id"),
                         button=args.get("button", "left"), modifiers=args.get("modifiers"), **delivery)
 
 def _do_scroll(backend, action, args, **delivery):
     return backend.scroll(direction=args.get("direction", "down"), amount=int(args.get("amount", 3)),
-                          element=args.get("element"), **_scroll_xy(args), modifiers=args.get("modifiers"), **delivery)
+                          element=args.get("element"), **_scroll_xy(args), modifiers=args.get("modifiers"),
+                          pid=args.get("pid"), window_id=args.get("window_id"), **delivery)
 
 def _do_capture(backend, action, args, **_):
     if (mode := str(args.get("mode", "som"))) not in {"som", "vision", "ax"}:
@@ -403,7 +406,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
     # delivery_mode / bring_to_front thread through every input action (background → foreground ladder).
     res = spec.handler(backend, action, args, delivery_mode=args.get("delivery_mode"),
                        bring_to_front=bool(args.get("bring_to_front")))
-    return res if isinstance(res, (str, dict)) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
+    return res if isinstance(res, (str, dict)) else _maybe_follow_capture(
+        backend, res, bool(args.get("capture_after")),
+        pid=args.get("pid"), window_id=args.get("window_id"),
+    )
 
 # ── Response shaping ────────────────────────────────────────────────────────
 def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
@@ -581,14 +587,17 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
                      "elements_file — read_file/search_files it, or pass app= to narrow scope)")
     return _text_capture_payload(v, "\n".join(lines), extra)
 
-def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_capture: bool) -> Any:
+def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_capture: bool, *,
+                          pid: Optional[int] = None, window_id: Optional[int] = None) -> Any:
     # No follow-up capture after a failed action: a normal-looking screenshot would suggest success.
     if not do_capture or not res.ok:
         return _text_response(res)
     try:
         # Recapture the exact window when known: on Linux several unrelated windows may share an app name, so
         # app-only recapture can switch targets.
-        exact = {k: (getattr(backend, "_last_target", None) or {}).get(k) for k in ("pid", "window_id")}
+        target = getattr(backend, "_last_target", None) or {}
+        exact = {"pid": pid if pid is not None else target.get("pid"),
+                 "window_id": window_id if window_id is not None else target.get("window_id")}
         cap = backend.capture(mode=_capture_after_mode(), **(exact if None not in exact.values()
                                                             else {"app": getattr(backend, "_last_app", None)}))
     except Exception as e:

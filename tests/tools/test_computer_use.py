@@ -182,6 +182,41 @@ class TestDispatch:
             "mode": "ax", "app": None, "pid": 23502, "window_id": 58720504,
         }
 
+    def test_pointer_actions_forward_exact_pid_window_target(self, noop_backend):
+        from tools.computer_use.tool import handle_computer_use
+
+        target = {"pid": 696, "window_id": 51295}
+        handle_computer_use({
+            "action": "click", "coordinate": [255, 130], **target,
+        })
+        handle_computer_use({
+            "action": "drag",
+            "from_coordinate": [10, 20],
+            "to_coordinate": [30, 40],
+            **target,
+        })
+        handle_computer_use({
+            "action": "scroll", "direction": "down", **target,
+        })
+
+        for action in ("click", "drag", "scroll"):
+            kwargs = next(c[1] for c in noop_backend.calls if c[0] == action)
+            assert (kwargs["pid"], kwargs["window_id"]) == (696, 51295)
+
+    def test_capture_after_uses_pointer_action_exact_target(self, noop_backend):
+        from tools.computer_use.tool import handle_computer_use
+
+        handle_computer_use({
+            "action": "click",
+            "coordinate": [255, 130],
+            "pid": 696,
+            "window_id": 51295,
+            "capture_after": True,
+        })
+
+        capture_kw = next(c[1] for c in noop_backend.calls if c[0] == "capture")
+        assert (capture_kw["pid"], capture_kw["window_id"]) == (696, 51295)
+
     def test_capture_after_skipped_when_action_failed(self, noop_backend):
         """capture_after must not fire when res.ok=False (regression guard).
 
