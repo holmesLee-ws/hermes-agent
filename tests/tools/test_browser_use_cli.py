@@ -603,6 +603,21 @@ class TestOwnTabPreamble:
         assert result["success"] is True
         assert "_hermes_install_tab_cap" not in result["output"]
 
+    def test_direct_cloud_preserves_leading_future_import(self, tmp_path, monkeypatch):
+        class _DirectBrowserUse:
+            name = "browser-use"
+
+        monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: _DirectBrowserUse())
+        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda: {"cloud_provider": "browser-use"})
+        cli = _fake_cli(tmp_path, "python3\n")
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+
+        result = json.loads(bu_cli.browser_exec(
+            "from __future__ import annotations\nprint('future-ok')", session="r7k2"))
+
+        assert result["success"] is True
+        assert "future-ok" in result["output"]
+
     def test_sentinel_never_reaches_subprocess_env(self, tmp_path, monkeypatch):
         import tools.browser_tool as bt
 
@@ -702,6 +717,32 @@ class TestOwnTabPreamble:
         assert "user-tab" in active
         assert all(f"user-race-{index:02d}" in active for index in range(11))
         assert len({target for target in active if target.startswith("hermes-")}) == 10
+
+    def test_tab_cap_does_not_claim_reused_user_blank_tab(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+        active = {"user-blank"}
+        closed = []
+
+        def cdp(method, **kwargs):
+            if method == "Target.getTargets":
+                return {"targetInfos": [{"targetId": "user-blank", "type": "page"}]}
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": "user-blank", "type": "page"}}
+            if method == "Target.closeTarget":
+                closed.append(kwargs["targetId"])
+                return {"success": True}
+            raise AssertionError(method)
+
+        namespace = {"cdp": cdp, "new_tab": lambda _url: "user-blank"}
+        exec(bu_cli._TAB_CAP_PREAMBLE, namespace)
+        for _ in range(12):
+            namespace["new_tab"]("about:blank")
+
+        ledgers = list((tmp_path / "hermes-home/cache/browser_tab_ledger").glob("*.json"))
+        assert closed == []
+        assert len(ledgers) == 1
+        assert json.loads(ledgers[0].read_text(encoding="utf-8")) == []
 
     def test_tab_cap_does_not_follow_predictable_temp_symlink(self, tmp_path, monkeypatch):
         import hashlib
@@ -1036,7 +1077,8 @@ class TestBrowserExec:
         assert result["success"] is True
         assert result["exit_code"] == 0
         assert "got:# hermes: cap live Hermes-owned tabs" in result["output"]
-        assert result["output"].rstrip().endswith('print("hi")')
+        assert 'print("hi")' in result["output"]
+        assert "<browser_exec>" in result["output"]
         assert "session" not in result
 
     def test_session_sets_bu_name(self, tmp_path, monkeypatch):

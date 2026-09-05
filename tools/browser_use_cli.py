@@ -181,9 +181,10 @@ def _hermes_install_tab_cap():
     _original_new_tab = new_tab
 
     def _capped_new_tab(*_args, **_kwargs):
+        _before = _live_page_ids()
         _result = _original_new_tab(*_args, **_kwargs)
         _target_id = _current_page_id()
-        if _target_id:
+        if _target_id and _target_id not in _before:
             _register([_target_id])
         return _result
 
@@ -732,7 +733,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     preamble = _TAB_CAP_PREAMBLE if _has_cdp_env(env) else ""
     if session and not private_browser:
         preamble += _OWN_TAB_PREAMBLE
-    code = preamble + "globals().pop('_hermes_register_tab_ids', None)\n" + code
+    if preamble:
+        code = (
+            preamble
+            + "globals().pop('_hermes_register_tab_ids', None)\n"
+            + f"exec(compile({code!r}, '<browser_exec>', 'exec'), globals(), globals())\n"
+        )
 
     workspace = _workspace_dir(task_id)
     if workspace:
