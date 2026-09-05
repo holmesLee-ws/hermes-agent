@@ -227,6 +227,16 @@ def test_pointer_action_partial_exact_target_is_refused():
     assert sess.last_args == {}
 
 
+def test_pointer_action_placeholder_target_uses_active_window():
+    out = {"isError": False, "data": {}, "structuredContent": {"effect": "confirmed"}}
+    sess = _FakeSession(out)
+    be = _make_backend(sess)
+
+    be.click(x=10, y=20, pid=0, window_id=0)
+
+    assert (sess.last_args["pid"], sess.last_args["window_id"]) == (4242, 7)
+
+
 def test_drag_exact_target_overrides_active_window():
     out = {"isError": False, "data": {}, "structuredContent": {"effect": "confirmed"}}
     sess = _FakeSession(out)
