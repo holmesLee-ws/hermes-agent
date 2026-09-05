@@ -40,40 +40,69 @@ _TAB_CAP_PREAMBLE = """\
 # hermes: cap live Hermes-owned tabs at ten per browser
 def _hermes_install_tab_cap():
     import hashlib as _hashlib, json as _json, os as _os
-    import tempfile as _tf, time as _time
+    import secrets as _secrets, stat as _stat, tempfile as _tf, time as _time
 
-    _endpoint = (
-        _os.environ.get("BU_CDP_WS")
-        or _os.environ.get("BU_CDP_URL")
-        or "local-default"
-    )
+    _endpoint = _os.environ.get("BU_CDP_WS") or _os.environ.get("BU_CDP_URL")
+    if not _endpoint:
+        return
     _browser_key = _hashlib.sha256(_endpoint.encode("utf-8")).hexdigest()[:16]
-    _uid = _os.getuid() if hasattr(_os, "getuid") else 0
-    _base = _os.path.join(_tf.gettempdir(), "hermes-bu-tabs-%s-%s" % (_uid, _browser_key))
-    _ledger = _base + ".json"
-    _lock = _base + ".lock"
+    _home = _os.path.expanduser(_os.environ.get("HERMES_HOME") or "~/.hermes")
+    _state_dir = _os.path.join(_home, "cache", "browser_tab_ledger")
+    try:
+        _os.makedirs(_state_dir, mode=0o700, exist_ok=True)
+        _mode = _os.lstat(_state_dir).st_mode
+        if _stat.S_ISLNK(_mode) or not _stat.S_ISDIR(_mode):
+            return
+        _os.chmod(_state_dir, 0o700)
+    except OSError:
+        return
+    _ledger = _os.path.join(_state_dir, _browser_key + ".json")
+    _lock = _os.path.join(_state_dir, _browser_key + ".lock")
     _max_tabs = 10
+    _lock_token = "%s:%s" % (_os.getpid(), _secrets.token_hex(12))
 
     def _live_page_ids():
         try:
-            _infos = cdp("Target.getTargets").get("targetInfos", [])
             return {
                 _info.get("targetId")
-                for _info in _infos
+                for _info in cdp("Target.getTargets").get("targetInfos", [])
                 if _info.get("type") == "page" and _info.get("targetId")
             }
         except Exception:
             return set()
 
+    def _current_page_id():
+        try:
+            _info = cdp("Target.getTargetInfo").get("targetInfo", {})
+            return _info.get("targetId") if _info.get("type") == "page" else None
+        except Exception:
+            return None
+
+    def _lock_owner_alive():
+        try:
+            _fd = _os.open(_lock, _os.O_RDONLY | getattr(_os, "O_NOFOLLOW", 0))
+            try:
+                _owner = _os.read(_fd, 128).decode("ascii", "ignore").split(":", 1)[0]
+            finally:
+                _os.close(_fd)
+            _os.kill(int(_owner), 0)
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+
     def _acquire_lock():
         for _attempt in range(100):
             try:
-                _fd = _os.open(_lock, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600)
-                _os.close(_fd)
+                _flags = _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY | getattr(_os, "O_NOFOLLOW", 0)
+                _fd = _os.open(_lock, _flags, 0o600)
+                try:
+                    _os.write(_fd, _lock_token.encode("ascii"))
+                finally:
+                    _os.close(_fd)
                 return True
             except FileExistsError:
                 try:
-                    if _time.time() - _os.path.getmtime(_lock) > 10:
+                    if _time.time() - _os.path.getmtime(_lock) > 60 and not _lock_owner_alive():
                         _os.unlink(_lock)
                         continue
                 except OSError:
@@ -85,28 +114,41 @@ def _hermes_install_tab_cap():
 
     def _release_lock():
         try:
-            _os.unlink(_lock)
+            _fd = _os.open(_lock, _os.O_RDONLY | getattr(_os, "O_NOFOLLOW", 0))
+            try:
+                _held = _os.read(_fd, 128).decode("ascii", "ignore")
+            finally:
+                _os.close(_fd)
+            if _held == _lock_token:
+                _os.unlink(_lock)
         except OSError:
             pass
 
     def _load_owned():
         try:
-            with open(_ledger, "r", encoding="utf-8") as _handle:
+            _fd = _os.open(_ledger, _os.O_RDONLY | getattr(_os, "O_NOFOLLOW", 0))
+            with _os.fdopen(_fd, "r", encoding="utf-8") as _handle:
                 _value = _json.load(_handle)
             return [str(_item) for _item in _value if isinstance(_item, str)]
         except Exception:
             return []
 
     def _save_owned(_owned):
-        _temp = _ledger + ".%s.tmp" % _os.getpid()
+        _fd, _temp = _tf.mkstemp(prefix=_browser_key + ".", suffix=".tmp", dir=_state_dir)
         try:
-            with open(_temp, "w", encoding="utf-8") as _handle:
+            if hasattr(_os, "fchmod"):
+                _os.fchmod(_fd, 0o600)
+            with _os.fdopen(_fd, "w", encoding="utf-8") as _handle:
                 _json.dump(_owned, _handle)
+                _handle.flush()
+                _os.fsync(_handle.fileno())
+            _fd = -1
             _os.replace(_temp, _ledger)
         finally:
+            if _fd >= 0:
+                _os.close(_fd)
             try:
-                if _os.path.exists(_temp):
-                    _os.unlink(_temp)
+                _os.unlink(_temp)
             except OSError:
                 pass
 
@@ -139,10 +181,10 @@ def _hermes_install_tab_cap():
     _original_new_tab = new_tab
 
     def _capped_new_tab(*_args, **_kwargs):
-        _before = _live_page_ids()
         _result = _original_new_tab(*_args, **_kwargs)
-        _after = _live_page_ids()
-        _register(sorted(_after - _before))
+        _target_id = _current_page_id()
+        if _target_id:
+            _register([_target_id])
         return _result
 
     _register([])
@@ -163,37 +205,46 @@ del _hermes_install_tab_cap
 _OWN_TAB_PREAMBLE = """\
 # hermes: pin this named session to its own tab (once per daemon process)
 def _hermes_ensure_own_tab():
-    import os as _os, tempfile as _tf
+    import hashlib as _hashlib, os as _os, stat as _stat
     _name = _os.environ.get("BU_NAME", "default")
     try:
-        # Key the marker by the daemon's pid so a daemon restart (which
-        # re-attaches to the first shared page) re-pins automatically,
-        # while agent-driven tab switches mid-session are left alone.
         from browser_harness import _ipc as _bipc
         _dpid = _bipc.pid_path(_name).read_text().strip() or "0"
     except Exception:
         _dpid = "0"
-    _uid = _os.getuid() if hasattr(_os, "getuid") else 0
-    _marker = _os.path.join(
-        _tf.gettempdir(), "hermes-bu-owntab-%s-%s-%s" % (_uid, _name, _dpid)
-    )
-    if _os.path.exists(_marker):
+    _home = _os.path.expanduser(_os.environ.get("HERMES_HOME") or "~/.hermes")
+    _state_dir = _os.path.join(_home, "cache", "browser_tab_ledger")
+    try:
+        _os.makedirs(_state_dir, mode=0o700, exist_ok=True)
+        _mode = _os.lstat(_state_dir).st_mode
+        if _stat.S_ISLNK(_mode) or not _stat.S_ISDIR(_mode):
+            return
+        _os.chmod(_state_dir, 0o700)
+    except OSError:
+        return
+    _marker_key = _hashlib.sha256((_name + ":" + _dpid).encode("utf-8")).hexdigest()[:24]
+    _marker = _os.path.join(_state_dir, "own-tab-" + _marker_key)
+    try:
+        _flags = _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY | getattr(_os, "O_NOFOLLOW", 0)
+        _fd = _os.open(_marker, _flags, 0o600)
+        _os.close(_fd)
+    except FileExistsError:
+        return
+    except OSError:
         return
     try:
-        # Force a fresh target: new_tab() would REUSE a blank current tab,
-        # which is exactly the tab a sibling daemon may also hold.
         _tid = cdp("Target.createTarget", url="about:blank").get("targetId")
-        if _tid:
-            switch_tab(_tid)
-            _register = globals().get("_hermes_register_tab_ids")
-            if _register:
-                _register([_tid])
+        if not _tid:
+            raise RuntimeError("Target.createTarget returned no targetId")
+        switch_tab(_tid)
+        _register = globals().get("_hermes_register_tab_ids")
+        if _register:
+            _register([_tid])
     except Exception:
-        pass  # best-effort: worst case is pre-fix behavior
-    try:
-        open(_marker, "w").close()
-    except OSError:
-        pass
+        try:
+            _os.unlink(_marker)
+        except OSError:
+            pass
 _hermes_ensure_own_tab()
 del _hermes_ensure_own_tab
 """
@@ -678,7 +729,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     # the model's code. Private per-name browsers (provider-keyed or BU
     # cloud) skip this: no one to collide with, and the extra tab would leak.
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)
-    preamble = _TAB_CAP_PREAMBLE
+    preamble = _TAB_CAP_PREAMBLE if _has_cdp_env(env) else ""
     if session and not private_browser:
         preamble += _OWN_TAB_PREAMBLE
     code = preamble + "globals().pop('_hermes_register_tab_ids', None)\n" + code

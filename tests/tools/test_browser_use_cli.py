@@ -589,6 +589,20 @@ class TestOwnTabPreamble:
         assert "_hermes_install_tab_cap" in result["output"]
         assert "_hermes_ensure_own_tab" not in result["output"]
 
+    def test_direct_cloud_without_endpoint_skips_tab_cap(self, tmp_path, monkeypatch):
+        class _DirectBrowserUse:
+            name = "browser-use"
+
+        monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: _DirectBrowserUse())
+        monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda: {"cloud_provider": "browser-use"})
+        cli = _fake_cli(tmp_path, "cat\n")
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+
+        result = json.loads(bu_cli.browser_exec("print('payload')", session="r7k2"))
+
+        assert result["success"] is True
+        assert "_hermes_install_tab_cap" not in result["output"]
+
     def test_sentinel_never_reaches_subprocess_env(self, tmp_path, monkeypatch):
         import tools.browser_tool as bt
 
@@ -611,15 +625,46 @@ class TestOwnTabPreamble:
         # and composes with model code
         ast.parse(bu_cli._TAB_CAP_PREAMBLE + bu_cli._OWN_TAB_PREAMBLE + "print('x')")
 
-    def test_tab_cap_closes_oldest_owned_tab_and_preserves_user_tab(
+    def test_own_tab_marker_does_not_follow_predictable_temp_symlink(
+        self, tmp_path, monkeypatch
+    ):
+        import sys
+        from types import ModuleType, SimpleNamespace
+
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        monkeypatch.setenv("BU_NAME", "r7k2")
+        pid_path = tmp_path / "daemon.pid"
+        pid_path.write_text("123", encoding="utf-8")
+        browser_harness = ModuleType("browser_harness")
+        browser_harness._ipc = SimpleNamespace(pid_path=lambda _name: pid_path)
+        monkeypatch.setitem(sys.modules, "browser_harness", browser_harness)
+        old_marker = tmp_path / f"hermes-bu-owntab-{os.getuid()}-r7k2-123"
+        victim = tmp_path / "victim.txt"
+        victim.write_text("preserve", encoding="utf-8")
+        old_marker.symlink_to(victim)
+
+        switched = []
+        namespace = {
+            "cdp": lambda method, **kwargs: {"targetId": "owned-1"},
+            "switch_tab": switched.append,
+        }
+        exec(bu_cli._OWN_TAB_PREAMBLE, namespace)
+
+        assert victim.read_text(encoding="utf-8") == "preserve"
+        assert switched == ["owned-1"]
+
+    def test_tab_cap_closes_oldest_owned_tab_and_preserves_user_tabs(
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
         monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
 
         active = {"user-tab"}
         closed = []
         counter = 0
+        current = "user-tab"
 
         def cdp(method, **kwargs):
             if method == "Target.getTargets":
@@ -629,6 +674,8 @@ class TestOwnTabPreamble:
                         for target_id in sorted(active)
                     ]
                 }
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": current, "type": "page"}}
             if method == "Target.closeTarget":
                 target_id = kwargs["targetId"]
                 closed.append(target_id)
@@ -637,10 +684,12 @@ class TestOwnTabPreamble:
             raise AssertionError(method)
 
         def new_tab(_url):
-            nonlocal counter
+            nonlocal counter, current
             target_id = f"hermes-{counter:02d}"
+            concurrent_user_id = f"user-race-{counter:02d}"
             counter += 1
-            active.add(target_id)
+            active.update({target_id, concurrent_user_id})
+            current = target_id
             return target_id
 
         namespace = {"cdp": cdp, "new_tab": new_tab}
@@ -651,7 +700,56 @@ class TestOwnTabPreamble:
 
         assert closed == ["hermes-00"]
         assert "user-tab" in active
-        assert len(active - {"user-tab"}) == 10
+        assert all(f"user-race-{index:02d}" in active for index in range(11))
+        assert len({target for target in active if target.startswith("hermes-")}) == 10
+
+    def test_tab_cap_does_not_follow_predictable_temp_symlink(self, tmp_path, monkeypatch):
+        import hashlib
+
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        endpoint = "http://127.0.0.1:9222"
+        monkeypatch.setenv("BU_CDP_URL", endpoint)
+        browser_key = hashlib.sha256(endpoint.encode()).hexdigest()[:16]
+        old_temp = tmp_path / f"hermes-bu-tabs-{os.getuid()}-{browser_key}.json.{os.getpid()}.tmp"
+        victim = tmp_path / "victim.txt"
+        victim.write_text("preserve", encoding="utf-8")
+        old_temp.symlink_to(victim)
+        active = {"hermes-00"}
+
+        def cdp(method, **kwargs):
+            if method == "Target.getTargets":
+                return {"targetInfos": [{"targetId": target, "type": "page"} for target in active]}
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": "hermes-00", "type": "page"}}
+            if method == "Target.closeTarget":
+                return {"success": True}
+            raise AssertionError(method)
+
+        namespace = {"cdp": cdp, "new_tab": lambda _url: "hermes-00"}
+        exec(bu_cli._TAB_CAP_PREAMBLE, namespace)
+        namespace["new_tab"]("https://example.com")
+
+        assert victim.read_text(encoding="utf-8") == "preserve"
+
+    def test_tab_cap_runs_without_fchmod(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+        monkeypatch.delattr(os, "fchmod")
+        active = {"hermes-00"}
+
+        def cdp(method, **kwargs):
+            if method == "Target.getTargets":
+                return {"targetInfos": [{"targetId": target, "type": "page"} for target in active]}
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": "hermes-00", "type": "page"}}
+            if method == "Target.closeTarget":
+                return {"success": True}
+            raise AssertionError(method)
+
+        namespace = {"cdp": cdp, "new_tab": lambda _url: "hermes-00"}
+        exec(bu_cli._TAB_CAP_PREAMBLE, namespace)
+        namespace["new_tab"]("https://example.com")
 
 
 class TestProviderPickerIntegration:

@@ -222,17 +222,6 @@ def _is_placeholder_id(value: Any) -> bool:
     parsed = _int_or_none(value)
     return parsed is not None and parsed <= 0
 
-def _is_helper_window_bounds(bounds: Optional[Dict[str, Any]]) -> bool:
-    """Return whether bounds describe a strip or 1x1 helper window."""
-    if not isinstance(bounds, dict):
-        return False
-    try:
-        height = float(bounds["height"])
-        width = float(bounds["width"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return height < 80.0 or (height <= 1.0 and width <= 1.0)
-
 def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalise cua-driver ``list_windows`` entries, dropping unusable ones. Every downstream call needs integer
     ``pid`` and ``window_id``; on X11 the PID comes from the optional ``_NET_WM_PID`` property, so root/panel/popup
@@ -246,7 +235,6 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if pid_int is None or window_id_int is None:
             continue
         z_raw, app_name, title = w.get("z_index"), w.get("app_name", ""), w.get("title", "")
-        bounds = w.get("bounds") if isinstance(w.get("bounds"), dict) else None
         windows.append({
             "app_name": app_name if isinstance(app_name, str) else "",
             "pid": pid_int,
@@ -255,8 +243,6 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "off_screen": w.get("is_on_screen") is False,
             "title": title if isinstance(title, str) else "",
             "z_index": z_raw if isinstance(z_raw, (int, float)) and not isinstance(z_raw, bool) else 0,
-            "bounds": bounds,
-            "helper": _is_helper_window_bounds(bounds),
         })
     return windows
 

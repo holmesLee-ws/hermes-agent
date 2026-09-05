@@ -217,6 +217,30 @@ class TestDispatch:
         capture_kw = next(c[1] for c in noop_backend.calls if c[0] == "capture")
         assert (capture_kw["pid"], capture_kw["window_id"]) == (696, 51295)
 
+    def test_capture_after_ignores_placeholder_pointer_target(self, noop_backend):
+        from tools.computer_use.tool import handle_computer_use
+
+        noop_backend._last_target = {"pid": 696, "window_id": 51295}
+        handle_computer_use({
+            "action": "click", "coordinate": [255, 130],
+            "pid": 0, "window_id": 0, "capture_after": True,
+        })
+
+        capture_kw = next(c[1] for c in noop_backend.calls if c[0] == "capture")
+        assert (capture_kw["pid"], capture_kw["window_id"]) == (696, 51295)
+
+    def test_non_pointer_capture_after_ignores_exact_pointer_fields(self, noop_backend):
+        from tools.computer_use.tool import handle_computer_use
+
+        noop_backend._last_target = {"pid": 696, "window_id": 51295}
+        handle_computer_use({
+            "action": "type", "text": "hello", "pid": 999, "window_id": 888,
+            "capture_after": True,
+        })
+
+        capture_kw = next(c[1] for c in noop_backend.calls if c[0] == "capture")
+        assert (capture_kw["pid"], capture_kw["window_id"]) == (696, 51295)
+
     def test_capture_after_skipped_when_action_failed(self, noop_backend):
         """capture_after must not fire when res.ok=False (regression guard).
 
