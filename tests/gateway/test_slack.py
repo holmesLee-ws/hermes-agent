@@ -5140,6 +5140,39 @@ class TestThreadImageContext:
         assert second.media_types == ["text/plain"]
 
     @pytest.mark.asyncio
+    async def test_concurrent_mentions_do_not_duplicate_root_delivery(
+        self, adapter_with_session_store
+    ):
+        a = self._prep(adapter_with_session_store)
+        a._has_active_session_for_thread = MagicMock(return_value=True)
+        a._get_thread_watermark = MagicMock(return_value="123.100")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_cache(*_args):
+            started.set()
+            await release.wait()
+            return ("/tmp/report.pdf", "application/pdf", "")
+
+        a._cache_slack_file = AsyncMock(side_effect=slow_cache)
+        a._app.client.conversations_replies = self._replies(
+            root_files=[{
+                "id": "F_PDF", "name": "report.pdf", "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/report.pdf", "size": 10,
+            }]
+        )
+
+        first = asyncio.create_task(a._handle_slack_message(self._thread_event(ts="123.456")))
+        await started.wait()
+        second = asyncio.create_task(a._handle_slack_message(self._thread_event(ts="123.457")))
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(first, second)
+
+        assert a._cache_slack_file.await_count == 1
+        assert a.handle_message.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_skipped_root_cache_retries_on_next_explicit_mention(
         self, adapter_with_session_store
     ):

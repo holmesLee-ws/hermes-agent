@@ -3991,7 +3991,7 @@ class SlackAdapter(BasePlatformAdapter):
     async def _hydrate_thread_context(
         self, *, channel_id: str, event_thread_ts, ts: str, user_id: str, team_id: str,
         is_thread_reply: bool, is_mentioned: bool, is_dm: bool,
-    ) -> Tuple[Optional[str], List[str], List[str], str, bool]:
+    ) -> Tuple[Optional[str], List[str], List[str], str, bool, str]:
         """Thread context, root media, and durable root-attachment delivery receipt. No session:
         full thread + root attachments once, set watermark. Session + @mention: delta past watermark
         (cache bypassed). Session, first plain reply this process: restart rehydration; later
@@ -4012,8 +4012,10 @@ class SlackAdapter(BasePlatformAdapter):
         thread_root_media_types: List[str] = []
         recovered_signature = ""
         recovery_complete = False
+        recovery_key = ""
         if not is_thread_reply:
-            return channel_context, thread_root_media_urls, thread_root_media_types, recovered_signature, recovery_complete
+            return (channel_context, thread_root_media_urls, thread_root_media_types,
+                    recovered_signature, recovery_complete, recovery_key)
         has_active_thread_session = self._has_active_session_for_thread(
             channel_id=channel_id, thread_ts=event_thread_ts, user_id=user_id, team_id=team_id,
             chat_type="dm" if is_dm else "group")
@@ -4043,7 +4045,8 @@ class SlackAdapter(BasePlatformAdapter):
                 channel_id, event_thread_ts, user_id, team_id)
             if rehydration_key in self._thread_rehydration_checked:
                 self._set_thread_watermark(watermark_ts=ts, **watermark_args)
-                return channel_context, thread_root_media_urls, thread_root_media_types, recovered_signature, recovery_complete
+                return (channel_context, thread_root_media_urls, thread_root_media_types,
+                        recovered_signature, recovery_complete, recovery_key)
             watermark_ts = self._get_thread_watermark(**watermark_args)
             if watermark_ts:
                 await _fetch(after_ts=watermark_ts, force_refresh=True)
@@ -4053,9 +4056,17 @@ class SlackAdapter(BasePlatformAdapter):
         delivered_signature = self._get_thread_root_attachment_signature(
             channel_id=channel_id, thread_ts=event_thread_ts, user_id=user_id,
             team_id=team_id, chat_type="dm" if is_dm else "group")
-        if not has_active_thread_session or (
+        should_collect = not has_active_thread_session or (
             is_mentioned and (not current_signature or delivered_signature != current_signature)
-        ):
+        )
+        candidate_key = self._thread_rehydration_key(
+            channel_id, event_thread_ts, user_id, team_id)
+        inflight = getattr(self, "_thread_root_recovery_inflight", None)
+        if inflight is None:
+            inflight = self._thread_root_recovery_inflight = set()
+        if should_collect and candidate_key not in inflight:
+            inflight.add(candidate_key)
+            recovery_key = candidate_key
             content_blocks: List[str]
             (
                 thread_root_media_urls, thread_root_media_types, content_blocks,
@@ -4067,7 +4078,8 @@ class SlackAdapter(BasePlatformAdapter):
                 channel_context = f"{channel_context}\n\n{recovered}" if channel_context else recovered
         self._set_thread_watermark(watermark_ts=ts, **watermark_args)
         self._mark_thread_rehydration_checked(channel_id, event_thread_ts, user_id, team_id)
-        return channel_context, thread_root_media_urls, thread_root_media_types, recovered_signature, recovery_complete
+        return (channel_context, thread_root_media_urls, thread_root_media_types,
+                recovered_signature, recovery_complete, recovery_key)
 
     @staticmethod
     def _media_message_type(media_types: List[str]) -> MessageType:
@@ -4314,7 +4326,7 @@ class SlackAdapter(BasePlatformAdapter):
         # Thread history stays out of ``text``: prepending would push a command off char zero.
         (
             channel_context, thread_root_media_urls, thread_root_media_types,
-            recovered_root_signature, root_recovery_complete,
+            recovered_root_signature, root_recovery_complete, root_recovery_key,
         ) = await self._hydrate_thread_context(
             channel_id=channel_id, event_thread_ts=event_thread_ts, ts=ts, user_id=user_id,
             team_id=team_id, is_thread_reply=is_thread_reply, is_mentioned=is_mentioned,
@@ -4340,12 +4352,16 @@ class SlackAdapter(BasePlatformAdapter):
                 f"{msg_event.text}")
         if ts:
             self._remember_processed_message_ts(ts)
-        await self.handle_message(msg_event)
-        if root_recovery_complete and recovered_root_signature:
-            self._set_thread_root_attachment_signature(
-                channel_id=channel_id, thread_ts=str(event_thread_ts), user_id=user_id,
-                signature=recovered_root_signature, team_id=team_id,
-                chat_type="dm" if is_dm else "group")
+        try:
+            await self.handle_message(msg_event)
+            if root_recovery_complete and recovered_root_signature:
+                self._set_thread_root_attachment_signature(
+                    channel_id=channel_id, thread_ts=str(event_thread_ts), user_id=user_id,
+                    signature=recovered_root_signature, team_id=team_id,
+                    chat_type="dm" if is_dm else "group")
+        finally:
+            if root_recovery_key:
+                getattr(self, "_thread_root_recovery_inflight", set()).discard(root_recovery_key)
 
     async def _build_message_event(
         self, event: dict, *, text: str, original_text: str, command_probe_text: str,
