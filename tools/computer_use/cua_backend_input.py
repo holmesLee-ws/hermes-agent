@@ -24,11 +24,18 @@ def _refuse(action: str, message: str, **fields: Any) -> ActionResult:
 class _InputMixin:
     """Pointer / keyboard / value-setter actions against the sticky target."""
 
-    def _target_args(self, action: str, *, need_window: bool = False) -> Tuple[Optional[ActionResult], Dict[str, Any]]:
-        """``(refusal, base args)`` for an input action against the sticky target."""
-        if self._active_pid is None or (need_window and self._active_window_id is None):
+    def _target_args(self, action: str, *, pid: Optional[int] = None,
+                     window_id: Optional[int] = None,
+                     need_window: bool = False) -> Tuple[Optional[ActionResult], Dict[str, Any]]:
+        """``(refusal, base args)`` for an input action against an exact or sticky target."""
+        if (pid is None) != (window_id is None):
+            return _refuse(action, f"Exact {action} targeting requires both pid and window_id."), {}
+        target_pid = pid if pid is not None else self._active_pid
+        target_window_id = window_id if window_id is not None else self._active_window_id
+        if target_pid is None or (need_window and target_window_id is None):
             return _refuse(action, _NO_TARGET_MSG), {}
-        return None, {"pid": self._active_pid, **({"window_id": self._active_window_id} if need_window else {})}
+        return None, {"pid": target_pid,
+                      **({"window_id": target_window_id} if target_window_id is not None else {})}
 
     def _pointer_args(self, tool: str, args: Dict[str, Any], variants: Sequence[_Variant],
                       missing_msg: Optional[str]) -> Optional[ActionResult]:
@@ -36,9 +43,9 @@ class _InputMixin:
         when the target has a pid but no window_id yet. No variant -> refuse with *missing_msg* (None = bare window)."""
         for what, extra in variants:
             if extra is not None:
-                if self._active_window_id is None:
+                if args.get("window_id") is None:
                     return _refuse(tool, f"No active window_id for {what}.")
-                args.update(extra() if callable(extra) else extra, window_id=self._active_window_id)
+                args.update(extra() if callable(extra) else extra)
                 return None
         return _refuse(tool, missing_msg) if missing_msg else None
 
@@ -75,10 +82,11 @@ class _InputMixin:
                                code="bring_to_front_requires_foreground")
             if not self._session._has_tool("bring_to_front"):
                 return _refuse(action, _BTF_UNSUPPORTED_MSG, code="bring_to_front_unsupported", delivery_mode="foreground")
-            if self._active_pid is None or self._active_window_id is None:
+            target_pid, target_window_id = args.get("pid"), args.get("window_id")
+            if target_pid is None or target_window_id is None:
                 return _refuse(action, "Capture an exact target before requesting persistent foreground focus.",
                                code="bring_to_front_target_required", delivery_mode="foreground")
-            focused = self.bring_to_front(pid=self._active_pid, window_id=self._active_window_id)
+            focused = self.bring_to_front(pid=target_pid, window_id=target_window_id)
             if not focused.ok:
                 return focused
         result = self._action(action, args)
@@ -87,9 +95,10 @@ class _InputMixin:
         return result
 
     def click(self, *, element: Optional[int] = None, x: Optional[int] = None, y: Optional[int] = None,
+              pid: Optional[int] = None, window_id: Optional[int] = None,
               button: str = "left", click_count: int = 1, modifiers: Optional[List[str]] = None,
               delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
-        refusal, args = self._target_args("click")
+        refusal, args = self._target_args("click", pid=pid, window_id=window_id)
         if refusal is not None:
             return refusal
         # Tool is chosen by click_count only; `button` goes through click's enum (the driver rejects unknown
@@ -112,9 +121,10 @@ class _InputMixin:
 
     def drag(self, *, from_element: Optional[int] = None, to_element: Optional[int] = None,
              from_xy: Optional[Tuple[int, int]] = None, to_xy: Optional[Tuple[int, int]] = None,
+             pid: Optional[int] = None, window_id: Optional[int] = None,
              button: str = "left", modifiers: Optional[List[str]] = None,
-             delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
-        refusal, args = self._target_args("drag")
+              delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
+        refusal, args = self._target_args("drag", pid=pid, window_id=window_id)
         if refusal is None:
             refusal = self._pointer_args("drag", args, (
                 ("element-based drag", {"from_element": from_element, "to_element": to_element}
@@ -127,8 +137,9 @@ class _InputMixin:
 
     def scroll(self, *, direction: str, amount: int = 3, element: Optional[int] = None,
                x: Optional[int] = None, y: Optional[int] = None, modifiers: Optional[List[str]] = None,
+               pid: Optional[int] = None, window_id: Optional[int] = None,
                delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
-        refusal, args = self._target_args("scroll")
+        refusal, args = self._target_args("scroll", pid=pid, window_id=window_id)
         if refusal is not None:
             return refusal
         args.update(direction=direction, amount=max(1, min(50, amount)))
@@ -140,7 +151,7 @@ class _InputMixin:
                       if self._session.supports_capability("input.scroll.coordinates", tool="scroll") else {})
         refusal = self._pointer_args("scroll", args, (
             ("element scroll", {"element_index": element}
-             if element is not None and self._active_window_id is not None else None),
+             if element is not None and args.get("window_id") is not None else None),
             ("coordinate scroll", xy if x is not None and y is not None else None),
         ), None)
         return refusal if refusal is not None else self._run_input_action("scroll", args, delivery_mode, bring_to_front)

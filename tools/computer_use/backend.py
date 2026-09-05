@@ -131,18 +131,21 @@ class ComputerUseBackend(ABC):
 
     @abstractmethod
     def click(self, *, element: Optional[int] = None, x: Optional[int] = None, y: Optional[int] = None,
+              pid: Optional[int] = None, window_id: Optional[int] = None,
               button: str = "left", click_count: int = 1, modifiers: Optional[List[str]] = None,
               delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult: ...
 
     @abstractmethod
     def drag(self, *, from_element: Optional[int] = None, to_element: Optional[int] = None,
              from_xy: Optional[Tuple[int, int]] = None, to_xy: Optional[Tuple[int, int]] = None,
+             pid: Optional[int] = None, window_id: Optional[int] = None,
              button: str = "left", modifiers: Optional[List[str]] = None,
              delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult: ...
 
     @abstractmethod
     def scroll(self, *, direction: str, amount: int = 3, element: Optional[int] = None,
                x: Optional[int] = None, y: Optional[int] = None, modifiers: Optional[List[str]] = None,
+               pid: Optional[int] = None, window_id: Optional[int] = None,
                delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult: ...
 
     @abstractmethod
