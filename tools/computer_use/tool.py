@@ -90,6 +90,19 @@ _session_auto_approve: Dict[str, bool] = {}   # sid -> "always_approve everythin
 _always_allow: Dict[str, set] = {}            # sid -> set of (action, delivery_mode) scope keys
 _escalation_warned: set = set()               # sids already warned that a bypass widened the driver mode
 
+def _approval_bypass_active(session_id: str) -> bool:
+    """Return whether this run explicitly disabled approval prompts."""
+    try:
+        from tools.approval import is_approval_bypass_active_for_session
+        from tools.approval_context import get_current_session_key
+        if is_approval_bypass_active_for_session(session_id or ""):
+            return True
+        current_key = get_current_session_key(default="")
+        return bool(current_key and current_key != (session_id or "")
+                    and is_approval_bypass_active_for_session(current_key))
+    except Exception:
+        return False
+
 def _cua_permission_mode(session_id: str) -> str:
     """Map Hermes's approval bypass onto Cua's immutable mode; fails closed. Both identity namespaces are consulted
     (DB ``session_id`` and gateway ``session_key`` contextvar) or a gateway ``/yolo`` would be invisible here.
@@ -101,21 +114,17 @@ def _cua_permission_mode(session_id: str) -> str:
     with contextlib.suppress(Exception):
         from tools.computer_use.cua_backend import _cua_configured_permission_mode
         configured = _cua_configured_permission_mode()
-    with contextlib.suppress(Exception):
-        from tools.approval import is_approval_bypass_active_for_session
-        from tools.approval_context import get_current_session_key
-        if is_approval_bypass_active_for_session(session_id) or (
-                bool(key := get_current_session_key(default="")) and is_approval_bypass_active_for_session(key)):
-            with _approval_lock:
-                warn = (key := str(session_id or "")) not in _escalation_warned
-                _escalation_warned.add(key)
-            if warn:
-                logger.warning(
-                    "computer_use: approval bypass (--yolo / -z) escalated the cua-driver permission mode from the "
-                    "configured '%s' to 'unrestricted' for this session. Runtime approval prompts are disabled and the "
-                    "driver's residual ceilings no longer apply. Drop the bypass flag to keep '%s', or declare a "
-                    "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
-            return "unrestricted"
+    if _approval_bypass_active(session_id):
+        with _approval_lock:
+            warn = (key := str(session_id or "")) not in _escalation_warned
+            _escalation_warned.add(key)
+        if warn:
+            logger.warning(
+                "computer_use: approval bypass (--yolo / -z) escalated the cua-driver permission mode from the "
+                "configured '%s' to 'unrestricted' for this session. Runtime approval prompts are disabled and the "
+                "driver's residual ceilings no longer apply. Drop the bypass flag to keep '%s', or declare a "
+                "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
+        return "unrestricted"
     return configured
 
 def _new_backend(permission_mode: str) -> ComputerUseBackend:
@@ -277,6 +286,8 @@ def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -
     user explicitly opted into unattended operation. State is keyed on session_id so concurrent runs don't
     leak unlocks into one another. See #67052.
     """
+    if _approval_bypass_active(session_id):
+        return None
     scope_key = (action, "foreground" if args.get("delivery_mode") == "foreground" else "background")
     with _approval_lock:
         if _session_auto_approve.get(session_id) or scope_key in _always_allow.get(session_id, set()):

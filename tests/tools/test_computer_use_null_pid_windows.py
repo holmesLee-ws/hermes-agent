@@ -69,6 +69,33 @@ class TestIngestWindows:
         assert w["off_screen"] is True          # derived from is_on_screen
         assert w["title"] == "Mozilla Firefox"
         assert w["z_index"] == 3
+        assert w["helper"] is False
+        assert w["bounds"] is None
+
+    def test_flags_helper_strips_and_keeps_content_bounds(self):
+        from tools.computer_use.cua_backend_parse import _ingest_windows
+
+        out = _ingest_windows([
+            {
+                "app_name": "Google Chrome",
+                "pid": 41609,
+                "window_id": 63988,
+                "is_on_screen": False,
+                "bounds": {"height": 33.0, "width": 1512.0},
+            },
+            {
+                "app_name": "Google Chrome",
+                "pid": 41609,
+                "window_id": 63962,
+                "is_on_screen": True,
+                "bounds": {"height": 827.0, "width": 1200.0},
+            },
+        ])
+
+        by_id = {window["window_id"]: window for window in out}
+        assert by_id[63988]["helper"] is True
+        assert by_id[63962]["helper"] is False
+        assert by_id[63962]["bounds"]["height"] == 827.0
 
 
 # ---------------------------------------------------------------------------
