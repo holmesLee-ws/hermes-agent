@@ -5661,6 +5661,7 @@ class SlackAdapter(BasePlatformAdapter):
                     if injection:
                         payload["content"] = injection.split("]:\n", 1)[-1]
                     payload["mimetype"] = media_type
+                    payload["media_index"] = len(media_urls) - 1
                     serialized = json.dumps(payload, ensure_ascii=False)
                     serialized = serialized.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
                     content_blocks.append(
