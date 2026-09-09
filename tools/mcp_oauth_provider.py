@@ -37,9 +37,11 @@ class HermesProviderMixin:
 
     _hermes_logger: logging.Logger = logger
 
-    def __init__(self, *args: Any, token_user_agent: str | None = None, oauth_flow: str = "browser", **kwargs: Any):
+    def __init__(self, *args: Any, token_user_agent: str | None = None, oauth_flow: str = "browser",
+                 configured_scope: str | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._hermes_oauth_flow = oauth_flow
+        self._hermes_configured_scope = configured_scope
         # oauth.user_agent — stamped onto token-endpoint requests only; some authorization servers/WAFs
         # reject httpx's default (#75576).
         self._hermes_token_user_agent = token_user_agent
@@ -54,6 +56,11 @@ class HermesProviderMixin:
                 "MCP device authorization requires `hermes mcp login <server> --flow device`; "
                 "background reconnects cannot start a device login")
         self._tolerate_missing_iss_for_known_server()
+        # The SDK's discovery step replaces an explicitly configured scope with every scope
+        # advertised by the server. Restore the user's narrower allowlist before authorization.
+        if self._hermes_configured_scope:
+            getattr(self, "context").client_metadata.scope = self._hermes_configured_scope
+
         return await super()._perform_authorization()
 
     def _tolerate_missing_iss_for_known_server(self) -> None:
@@ -449,4 +456,5 @@ def build_provider_kwargs(cfg: dict, storage: "HermesTokenStorage", *, ssh_proxy
         "callback_handler": mo._make_callback_waiter(port, cfg.get("_cimd_url"), timeout=float(cfg.get("timeout", 300))),
         "token_user_agent": mo.token_request_user_agent(cfg),
         "oauth_flow": cfg.get("flow", "browser"),
+        "configured_scope": cfg.get("scope"),
         **mo.cimd_provider_kwargs(cfg)}

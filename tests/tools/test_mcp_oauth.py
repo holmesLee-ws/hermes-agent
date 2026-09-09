@@ -236,6 +236,27 @@ class TestBuildOAuthAuth:
         assert provider is not None
         assert provider.context.client_metadata.scope == "read write admin"
 
+    def test_configured_scope_survives_sdk_discovery(self, tmp_path, monkeypatch):
+        from mcp.client.auth.oauth2 import OAuthClientProvider
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
+        provider = build_oauth_auth("scoped", "https://example.com/mcp", {
+            "scope": "read write",
+        })
+        assert provider is not None
+        provider.context.client_metadata.scope = "read write admin"
+        seen = {}
+
+        async def perform_authorization(instance):
+            seen["scope"] = instance.context.client_metadata.scope
+            return "request"
+
+        monkeypatch.setattr(OAuthClientProvider, "_perform_authorization", perform_authorization)
+
+        assert asyncio.run(provider._perform_authorization()) == "request"
+        assert seen["scope"] == "read write"
+
     @pytest.mark.asyncio
     async def test_token_exchange_includes_secret_for_dcr_secret_client(self, tmp_path, monkeypatch):
         from mcp.shared.auth import OAuthClientInformationFull
