@@ -4275,8 +4275,12 @@ class SlackAdapter(BasePlatformAdapter):
         should_collect = not has_active_thread_session or (
             is_mentioned and (not current_signature or delivered_signature != current_signature)
         )
-        candidate_key = self._thread_rehydration_key(
-            channel_id, event_thread_ts, user_id, team_id)
+        chat_type = "dm" if is_dm else "group"
+        candidate_key = self._build_thread_session_key(
+            channel_id, event_thread_ts, user_id, team_id=team_id, chat_type=chat_type)
+        if not candidate_key:
+            candidate_key = self._thread_rehydration_key(
+                channel_id, event_thread_ts, user_id, team_id)
         inflight = getattr(self, "_thread_root_recovery_inflight", None)
         if inflight is None:
             inflight = self._thread_root_recovery_inflight = set()
@@ -4284,11 +4288,15 @@ class SlackAdapter(BasePlatformAdapter):
             inflight.add(candidate_key)
             recovery_key = candidate_key
             content_blocks: List[str]
-            (
-                thread_root_media_urls, thread_root_media_types, content_blocks,
-                recovered_signature, recovery_complete,
-            ) = await self._collect_thread_root_attachments(
-                channel_id=channel_id, thread_ts=event_thread_ts, team_id=team_id)
+            try:
+                (
+                    thread_root_media_urls, thread_root_media_types, content_blocks,
+                    recovered_signature, recovery_complete,
+                ) = await self._collect_thread_root_attachments(
+                    channel_id=channel_id, thread_ts=event_thread_ts, team_id=team_id)
+            except BaseException:
+                inflight.discard(candidate_key)
+                raise
             if content_blocks:
                 recovered = "\n\n".join(content_blocks)
                 channel_context = f"{channel_context}\n\n{recovered}" if channel_context else recovered
@@ -4567,28 +4575,29 @@ class SlackAdapter(BasePlatformAdapter):
             channel_id=channel_id, event_thread_ts=event_thread_ts, ts=ts, user_id=user_id,
             team_id=team_id, is_thread_reply=is_thread_reply, is_mentioned=is_mentioned,
             is_dm=is_dm)
-        # Thread-root media is delivered ahead of the trigger message's own files.
-        media_urls, media_types, media_text_inlined, text = await self._collect_inbound_media(
-            event, channel_id, team_id, text, thread_root_media_urls, thread_root_media_types)
-        msg_event = await self._build_message_event(
-            event, text=text, original_text=original_text, command_probe_text=command_probe_text,
-            is_command_text=is_command_text, channel_id=channel_id, team_id=team_id, ts=ts,
-            user_id=user_id, thread_ts=thread_ts, is_dm=is_dm, media_urls=media_urls,
-            media_types=media_types, media_text_inlined=media_text_inlined, channel_context=channel_context)
-        # React only when directly addressed; MPIMs are shared, so they need a
-        # mention like any channel.
-        if (is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
-            self._track_reacting_message(team_id, ts)
-        # App-context is per-turn UI state: in the user message, not SessionSource (would rebuild
-        # the agent per view switch and leak stale context). Inert label, never a channel body.
-        context_channel_id = agent_context.get("context_channel_id", "")
-        if context_channel_id and context_channel_id != channel_id and not is_command_text:
-            msg_event.text = (
-                f"[Slack app context: user is viewing channel {context_channel_id}]\n\n"
-                f"{msg_event.text}")
-        if ts:
-            self._remember_processed_message_ts(ts)
         try:
+            # Thread-root media is delivered ahead of the trigger message's own files.
+            media_urls, media_types, media_text_inlined, text = await self._collect_inbound_media(
+                event, channel_id, team_id, text, thread_root_media_urls, thread_root_media_types)
+            msg_event = await self._build_message_event(
+                event, text=text, original_text=original_text, command_probe_text=command_probe_text,
+                is_command_text=is_command_text, channel_id=channel_id, team_id=team_id, ts=ts,
+                user_id=user_id, thread_ts=thread_ts, is_dm=is_dm, media_urls=media_urls,
+                media_types=media_types, media_text_inlined=media_text_inlined,
+                channel_context=channel_context)
+            # React only when directly addressed; MPIMs are shared, so they need a
+            # mention like any channel.
+            if (is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
+                self._track_reacting_message(team_id, ts)
+            # App-context is per-turn UI state: in the user message, not SessionSource (would rebuild
+            # the agent per view switch and leak stale context). Inert label, never a channel body.
+            context_channel_id = agent_context.get("context_channel_id", "")
+            if context_channel_id and context_channel_id != channel_id and not is_command_text:
+                msg_event.text = (
+                    f"[Slack app context: user is viewing channel {context_channel_id}]\n\n"
+                    f"{msg_event.text}")
+            if ts:
+                self._remember_processed_message_ts(ts)
             await self.handle_message(msg_event)
             if root_recovery_complete and recovered_root_signature:
                 self._set_thread_root_attachment_signature(

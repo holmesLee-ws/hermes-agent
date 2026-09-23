@@ -42,6 +42,25 @@ def noop_backend():
 
 class TestSchema:
 
+    def test_native_computer_use_guidance_keeps_secrets_out_of_model_visible_input(self):
+        from tools.computer_use.schema import COMPUTER_USE_SCHEMA
+
+        root = Path(__file__).resolve().parents[2]
+        guidance = [
+            COMPUTER_USE_SCHEMA["description"],
+            (root / "skills/autonomous-ai-agents/computer-use/SKILL.md").read_text(
+                encoding="utf-8"),
+            (root / "website/docs/user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-computer-use.md").read_text(
+                encoding="utf-8"),
+        ]
+
+        for text in guidance:
+            text = " ".join(text.lower().split())
+            assert "never ask for, accept, or type passwords" in text
+            assert "model-visible native" in text
+            assert "browser vault tools" in text
+            assert "complete native secret or 2fa entry privately" in text
+
     def test_schema_does_not_impose_blanket_ui_or_secret_action_bans(self):
         from tools.computer_use.schema import COMPUTER_USE_SCHEMA
 
