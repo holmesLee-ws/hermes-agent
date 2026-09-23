@@ -4863,6 +4863,111 @@ class TestThreadImageContext:
         assert a.handle_message.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_concurrent_per_user_sessions_have_independent_root_recovery_fences(
+        self, adapter_with_session_store
+    ):
+        a = self._prep(adapter_with_session_store)
+        a.config.extra["thread_sessions_per_user"] = True
+        a._has_active_session_for_thread = MagicMock(return_value=True)
+        a._get_thread_watermark = MagicMock(return_value="123.100")
+        a._user_name_cache[("T_TEAM", "U_OTHER")] = "Other"
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        starts = 0
+
+        async def slow_cache(*_args):
+            nonlocal starts
+            starts += 1
+            if starts == 2:
+                both_started.set()
+            await release.wait()
+            return ("/tmp/report.pdf", "application/pdf", "")
+
+        a._cache_slack_file = AsyncMock(side_effect=slow_cache)
+        a._app.client.conversations_replies = self._replies(
+            root_files=[{
+                "id": "F_PDF", "name": "report.pdf", "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/report.pdf", "size": 10,
+            }]
+        )
+
+        tasks = [
+            asyncio.create_task(a._handle_slack_message(
+                self._thread_event(user="U_USER", ts="123.456"))),
+            asyncio.create_task(a._handle_slack_message(
+                self._thread_event(user="U_OTHER", ts="123.457"))),
+        ]
+        try:
+            await asyncio.wait_for(both_started.wait(), timeout=2)
+        finally:
+            release.set()
+            await asyncio.gather(*tasks)
+
+        assert a._cache_slack_file.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cancelled_root_collection_releases_fence_for_retry(
+        self, adapter_with_session_store
+    ):
+        a = self._prep(adapter_with_session_store)
+        a._has_active_session_for_thread = MagicMock(return_value=True)
+        a._get_thread_watermark = MagicMock(return_value="123.100")
+        started = asyncio.Event()
+        never_release = asyncio.Event()
+
+        async def cancelled_cache(*_args):
+            started.set()
+            await never_release.wait()
+
+        a._cache_slack_file = AsyncMock(side_effect=cancelled_cache)
+        a._app.client.conversations_replies = self._replies(
+            root_files=[{
+                "id": "F_PDF", "name": "report.pdf", "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/report.pdf", "size": 10,
+            }]
+        )
+
+        first = asyncio.create_task(a._handle_slack_message(self._thread_event(ts="123.456")))
+        await started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        a._cache_slack_file = AsyncMock(
+            return_value=("/tmp/report.pdf", "application/pdf", ""))
+        await a._handle_slack_message(self._thread_event(ts="123.457"))
+
+        a._cache_slack_file.assert_awaited_once()
+        assert a.handle_message.await_args.args[0].media_types == ["application/pdf"]
+
+    @pytest.mark.asyncio
+    async def test_enrichment_failure_releases_root_recovery_fence_for_retry(
+        self, adapter_with_session_store
+    ):
+        a = self._prep(adapter_with_session_store)
+        a._has_active_session_for_thread = MagicMock(return_value=True)
+        a._get_thread_watermark = MagicMock(return_value="123.100")
+        a._cache_slack_file = AsyncMock(
+            return_value=("/tmp/report.pdf", "application/pdf", ""))
+        a._app.client.conversations_replies = self._replies(
+            root_files=[{
+                "id": "F_PDF", "name": "report.pdf", "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/report.pdf", "size": 10,
+            }]
+        )
+        collect_inbound_media = a._collect_inbound_media
+        a._collect_inbound_media = AsyncMock(side_effect=RuntimeError("enrichment failed"))
+
+        with pytest.raises(RuntimeError, match="enrichment failed"):
+            await a._handle_slack_message(self._thread_event(ts="123.456"))
+
+        a._collect_inbound_media = collect_inbound_media
+        await a._handle_slack_message(self._thread_event(ts="123.457"))
+
+        assert a._cache_slack_file.await_count == 2
+        assert a.handle_message.await_args.args[0].media_types == ["application/pdf"]
+
+    @pytest.mark.asyncio
     async def test_skipped_root_cache_retries_on_next_explicit_mention(
         self, adapter_with_session_store
     ):
