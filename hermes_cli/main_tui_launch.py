@@ -485,12 +485,13 @@ def _run_tui_npm_build(npm: str, cwd: Path, failure_message: str) -> None:
 
 
 def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
-    """``npm install`` for the TUI workspace, with one EBADENGINE repair retry. Exits on failure.
+    """Non-saving ``npm install`` for the TUI workspace, with one EBADENGINE repair retry.
 
     ``--workspace ui-tui`` avoids resolving apps/desktop (Electron + node-pty) and
     is omitted when ui-tui/ has its own lockfile. ``--include=dev``: the build
     toolchain is in devDependencies and an inherited ``NODE_ENV=production`` /
-    ``omit=dev`` would silently skip it.
+    ``omit=dev`` would silently skip it. ``--no-save`` keeps a partial workspace
+    install from rewriting the tracked root lockfile with a reduced closure.
     """
     npm = _tui_node_bin("npm")
     if not os.environ.get("HERMES_QUIET"):
@@ -505,7 +506,7 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
         npm_cwd, npm_workspace_args = _termux_workspace_install_context(tui_dir, include_child_workspaces=True)
     npm_install_cmd = [
         npm, "install", *npm_workspace_args,
-        "--include=dev", "--silent", "--no-fund", "--no-audit", "--progress=false",
+        "--no-save", "--include=dev", "--silent", "--no-fund", "--no-audit", "--progress=false",
     ]
 
     def _run_tui_install() -> subprocess.CompletedProcess:

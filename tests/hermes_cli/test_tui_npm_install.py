@@ -424,6 +424,7 @@ def test_make_tui_argv_keeps_desktop_workspace_install_behaviour(
         "install",
         "--workspace",
         "ui-tui",
+        "--no-save",
         "--include=dev",
         "--silent",
         "--no-fund",
@@ -433,6 +434,29 @@ def test_make_tui_argv_keeps_desktop_workspace_install_behaviour(
     assert calls[0][1]["cwd"] == str(tmp_path)
     _assert_utf8_replace_capture(calls[0][1])
     _assert_utf8_replace_capture(calls[1][1])
+
+
+def test_tui_workspace_install_does_not_save_root_lockfile(
+    tmp_path: Path, main_mod, monkeypatch
+) -> None:
+    tui_dir = tmp_path / "ui-tui"
+    tui_dir.mkdir()
+    (tui_dir / "package.json").write_text("{}")
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text('{"tracked":true}')
+
+    monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
+
+    def fake_run(args, **_kwargs):
+        if args[:2] == ["/bin/npm", "install"] and "--no-save" not in args:
+            lockfile.write_text('{"tracked":false}')
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+
+    main_tui_launch._install_tui_dependencies(tui_dir, termux_startup=False)
+
+    assert lockfile.read_text() == '{"tracked":true}'
 
 
 def test_make_tui_argv_npm_install_forces_include_dev(
