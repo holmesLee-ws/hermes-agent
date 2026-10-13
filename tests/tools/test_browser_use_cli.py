@@ -694,6 +694,7 @@ class TestOwnTabPreamble:
             name = "browser-use"
 
         monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: _DirectBrowserUse())
+        monkeypatch.setattr(bu_cli, "_browser_use_api_key_set", lambda: True)
         monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda: {"cloud_provider": "browser-use"})
         cli = _fake_cli(tmp_path, "cat\n")
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
@@ -708,6 +709,7 @@ class TestOwnTabPreamble:
             name = "browser-use"
 
         monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: _DirectBrowserUse())
+        monkeypatch.setattr(bu_cli, "_browser_use_api_key_set", lambda: True)
         monkeypatch.setattr(bu_cli, "_read_browser_cfg", lambda: {"cloud_provider": "browser-use"})
         cli = _fake_cli(tmp_path, "python3\n")
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
@@ -820,7 +822,6 @@ class TestOwnTabPreamble:
     def test_tab_cap_does_not_claim_reused_user_blank_tab(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
         monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
-        active = {"user-blank"}
         closed = []
 
         def cdp(method, **kwargs):
